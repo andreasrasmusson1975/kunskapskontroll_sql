@@ -30,8 +30,9 @@ from matplotlib import pyplot as plt
 import seaborn as sns
 import networkx as nx
 
-# Set seaborn theme
+# Set seaborn theme and context
 sns.set_theme(style="darkgrid")  
+sns.set_context(context="notebook")
 
 # A query for getting the schema names, table names and
 # table row counts for those schemas that would be
@@ -67,7 +68,21 @@ AND
     (T3.INDEX_ID IN (0, 1) OR T1.TYPE = 'V') -- We are only interested in row counts in the actual physical storage of
                                              -- data. Excluding other indexes achieves this.
 AND
-    T2.NAME <> 'DBO' 
+    T2.NAME NOT IN (
+        'sys', 
+        'INFORMATION_SCHEMA', 
+        'dbo', 
+        'guest', 
+        'db_accessadmin', 
+        'db_backupoperator', 
+        'db_datareader', 
+        'db_datawriter', 
+        'db_ddladmin', 
+        'db_denydatareader', 
+        'db_denydatawriter', 
+        'db_owner', 
+        'db_securityadmin'
+    )
 GROUP BY 
         T2.NAME
     ,T1.NAME
