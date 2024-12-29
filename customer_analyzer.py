@@ -25,6 +25,7 @@ from matplotlib import pyplot as plt
 import seaborn as sns
 import numpy as np
 from scipy.stats import norm
+from tqdm.notebook import tqdm
 
 # Set seaborn theme and context
 sns.set_theme(style="darkgrid")
@@ -363,51 +364,94 @@ class CustomerAnalyzer :
     # SegmentAverageAdjustedProfit. Then filter the dataframe
     # again so that we only have segments with a high lower  
     # bound for the SegmentAverageSalesReasonIDIsAppropriate
-    # point estimate. Finally, perform sorting and index reset.
+    # point estimate and positive lower bound for the 
+    # AverageAdjustedProfit estimate. Finally, perform sorting 
+    # and index reset.
     def __create_aggregated_data_df__(self):
-        
-        # Group and aggregate
+        # Aggregate on the order level
         df=self.data_df.copy().groupby(
-            by='Label',                
+            by=['Label','CustomerID','SalesOrderID'],                
             as_index=False
         ).agg(
-            SegmentNumDistinctCustomers = ('CustomerID',lambda x:len(set(x))), 
-            SegmentNumDistinctOrders = ('SalesOrderID',lambda x:len(set(x))),
-            SegmentNumOrderDetail = ('SalesOrderDetailID','count'),
-            SegmentNumDestinctProducts = ('ProductID',lambda x:len(set(x))),
-            SegmentAverageSalesReasonIDIsAppropriate = ('SalesReasonIDIsAppropriate','mean'),
-            SegmentAverageAdjustedProfit = ('AdjustedProfit','mean'),
-            
+            NumOrderDetail = ('SalesOrderDetailID','count'),
+            AvgSalesReasonIDIsAppropriate = ('SalesReasonIDIsAppropriate','mean'),
+            AvgAdjustedProfit = ('AdjustedProfit','mean')
         )
-        # Filter
-        df = df[df['SegmentNumDistinctCustomers'] >= 50]
-        
+        # Aggregate on the customer level
+        df = df.groupby(
+            by=['Label','CustomerID'],
+            as_index=False
+        ).agg(
+            NumOrderDetail = ('NumOrderDetail','sum'),
+            NumDistinctOrders = ('SalesOrderID',lambda x:len(set(x))),
+            NumDistinctCustomers = ('CustomerID',lambda x:len(set(x))),
+            AvgAvgSalesReasonIDIsAppropriate = ('AvgSalesReasonIDIsAppropriate','mean'),
+            AvgAvgAdjustedProfit = ('AvgAdjustedProfit','mean')
+        )
+        # Aggregate on the label level
+        df2 = df.groupby(
+            by='Label',
+            as_index=False
+        ).agg(
+            SegmentNumOrderDetail = ('NumOrderDetail','sum'),
+            SegmentNumDistinctOrders = ('NumDistinctOrders','sum'),
+            SegmentNumDistinctCustomers = ('NumDistinctCustomers','sum'),
+            SegmentAvgAvgAvgSalesReasonIDIAppropriate = ('AvgAvgSalesReasonIDIsAppropriate','mean'),
+            SegmentAvgAvgAvgAdjustedProfit = ('AvgAvgAdjustedProfit','mean')
+        )
+
         # Add confidence interval lower bounds
-        df = self.__set_ci_lower_bounds__(
-            self.data_df,
+        df2 = self.__set_conservative_lower_bounds__(
             df,
-            'SalesReasonIDIsAppropriate',
+            df2,
+            'AvgAvgSalesReasonIDIsAppropriate',
             'Label'
         )
-        df = self.__set_ci_lower_bounds__(
-            self.data_df,
+        df2 = self.__set_conservative_lower_bounds__(
             df,
-            'AdjustedProfit',
+            df2,
+            'AvgAvgAdjustedProfit',
             'Label'
         )
-        # Filter again
-        df=df[df['AverageSalesReasonIDIsAppropriateCILowerBound'] >= 0.8]
-        
+
+        # Filter
+        df2 = df2[df2['SegmentNumDistinctCustomers'] >= 50]
+        df2=df2[df2['AvgAvgAvgSalesReasonIDIsAppropriateConservativeCILowerBound'] >= 0.7]
+
         # Sort and reset index
-        df.sort_values(
-            by='AverageAdjustedProfitCILowerBound',
+        df2.sort_values(
+            by='AvgAvgAvgAdjustedProfitConservativeCILowerBound',
             ascending=False,
             inplace=True
         )
-        df.reset_index(inplace=True,drop=True)
+        df2.reset_index(inplace=True,drop=True)
         
-        self.aggregated_data_df = df
-    
+        self.aggregated_data_df_customer_level = df
+        self.aggregated_data_df = df2
+
+    def __set_conservative_lower_bounds__(
+        self,
+        base_df: pd.core.frame.DataFrame,
+        agg_df: pd.core.frame.DataFrame,
+        variable: str,
+        label: str
+    ) -> pd.core.frame.DataFrame:
+        agg_df = self.__set_ci_lower_bounds__(
+            base_df,
+            agg_df,
+            variable,
+            label
+        )
+        agg_df = self.__set_bootstrapped_lower_bounds__(
+            base_df,
+            agg_df,
+            variable,
+            label
+        )
+        agg_df['Avg'+variable+'ConservativeCILowerBound'] = np.minimum(agg_df['Avg'+variable+'CILowerBound'],agg_df['Avg'+variable+'BootstrappedCILowerBound'])
+        agg_df.drop(['Avg'+variable+'CILowerBound','Avg'+variable+'BootstrappedCILowerBound'],axis=1,inplace=True)
+        return agg_df
+
     # Helper method that, given a base dataframe with a numerical
     # column, an aggregated dataframe for that numerical column
     # and a label column, calculates confidence interval lower
@@ -424,7 +468,7 @@ class CustomerAnalyzer :
         #
         # 1. The label column
         # 2. The condfidence interval lower bound column  
-        ci_df=pd.DataFrame(columns=[label,'Average'+variable+'CILowerBound'])
+        ci_df=pd.DataFrame(columns=[label,'Avg'+variable+'CILowerBound'])
         
         # Iterate over the rows of the aggregated dataframe and fill
         # the newly created dataframe with confidence interval lower
@@ -433,12 +477,42 @@ class CustomerAnalyzer :
             observations = base_df[base_df[label]==row[label]][variable].copy()
             average = observations.mean()
             standard_error = np.std(observations,ddof=1)/np.sqrt(len(observations))
-            l=average - 2*1.96 * standard_error
+            l=average - 1.645 * standard_error
             ci_df.loc[idx] = [row[label],l]
         # Merge the aggregated dataframe with the newly
         # created dataframe
         agg_df=agg_df.merge(ci_df,how='inner',on=label)
-        return agg_df      
+        return agg_df
+
+    def __set_bootstrapped_lower_bounds__(
+            self,
+            base_df: pd.core.frame.DataFrame,
+            agg_df: pd.core.frame.DataFrame,
+            variable: str,
+            label: str,
+            n_iter: int = 10000
+        ):
+
+        # Create an empty dataframe with two columns:
+        #
+        # 1. The label column
+        # 2. The condfidence interval lower bound column  
+        ci_df=pd.DataFrame(columns=[label,'Avg'+variable+'BootstrappedCILowerBound'])
+
+        # Iterate over the rows of the aggregated dataframe and fill
+        # the newly created dataframe with confidence interval lower
+        # bounds.
+        lst = [(idx,row) for idx,row in agg_df.iterrows()]
+        for idx,row in tqdm(lst):
+            observations = base_df[base_df[label]==row[label]][variable].copy()
+            avgs = [observations.sample(n=len(observations),replace=True).mean() for i in range(n_iter)]
+            l = np.percentile(avgs,5)
+            ci_df.loc[idx] = [row[label],l]
+        
+        # Merge the aggregated dataframe with the newly
+        # created dataframe
+        agg_df=agg_df.merge(ci_df,how='inner',on=label)
+        return agg_df
     
     def get_top_products(self,label: str) -> pd.core.frame.DataFrame:
         """
@@ -454,25 +528,34 @@ class CustomerAnalyzer :
         
         # Create the df with the desired quantities
         df=self.detailed_data_df[self.detailed_data_df['Label'] == label].groupby(
-            by='ProductSubCategoryName',
+            by=['CustomerID','ProductSubCategoryName'],
             as_index=False
         ).agg(
-            NumSold=('SalesOrderDetailID','count'),
+            NumSold = ('SalesOrderDetailID','count'),
+            NumDistinctCustomers = ('CustomerID',lambda x:len(set(x))),
             AvgAdjProfit=('AdjustedProfit','mean')
         )
         
-        # Filter the dataframe on the sales volume
-        df=df[df['NumSold'] >= 50]
-
+        df2 = df.groupby(
+            by='ProductSubCategoryName',
+            as_index=False
+        ).agg(
+            NumSold = ('NumSold','sum'),
+            NumDistinctCustomers = ('NumDistinctCustomers','sum'),
+            AvgAvgAdjProfit = ('AvgAdjProfit','mean')
+        )
+        
         # Calculate confidence interval lower bounds for
         # each product sub category
-        df=self.__set_ci_lower_bounds__(self.detailed_data_df[self.detailed_data_df['Label'] == label],df,'AdjustedProfit','ProductSubCategoryName')
-        
+        df2=self.__set_conservative_lower_bounds__(df,df2,'AvgAdjProfit','ProductSubCategoryName')
+        # Filter the dataframe on the number of customers
+        df2=df2[df2['NumDistinctCustomers'] >= 50]
+
         # Clean up
-        df.sort_values(by='NumSold',ascending=False,inplace=True)
-        df.reset_index(inplace=True,drop=True)
+        df2.sort_values(by='NumSold',ascending=False,inplace=True)
+        df2.reset_index(inplace=True,drop=True)
         
-        return df
+        return df2
     
     def plot_top_five_segments(self):
         """
@@ -484,7 +567,7 @@ class CustomerAnalyzer :
         # Create a dataframe consisting of the data
         # that is to be plotted
         df = self.aggregated_data_df.sort_values(
-            by='AverageAdjustedProfitCILowerBound',
+            by='AvgAvgAvgAdjustedProfitConservativeCILowerBound',
             ascending=False
         ).iloc[:5,:]
         
@@ -492,17 +575,17 @@ class CustomerAnalyzer :
         fig,ax=plt.subplots(figsize=(10,5))
         sns.barplot(
             data=df, 
-            x='AverageAdjustedProfitCILowerBound', 
+            x='AvgAvgAvgAdjustedProfitConservativeCILowerBound', 
             y=['1','2','3','4','5'],
             palette = sns.light_palette("navy", reverse=False, as_cmap=False,n_colors=5),
             edgecolor=".2",
-            hue='AverageAdjustedProfitCILowerBound',
+            hue='AvgAvgAvgAdjustedProfitConservativeCILowerBound',
             legend=False
         )
         # Set axis labels and title
-        ax.set_xlabel('Average Profit Lower Bound')
+        ax.set_xlabel('Profitability Score Lower Bound')
         ax.set_ylabel('Segment')
-        ax.set_title('TOP 5 SEGMENTS AND THEIR AVERAGE PROFIT LOWER BOUNDS')
+        ax.set_title('TOP 5 SEGMENTS AND THEIR PROFITABILITY SCORE LOWER BOUNDS')
         
         # Create a legend containging descriptions of the segment labels in the chart
         legend_entries = ''.join([f'{idx+1}: {self.label_to_description(label)}\n' for idx,label in df['Label'].items()])
@@ -542,29 +625,29 @@ class CustomerAnalyzer :
         #Create the plots
         fig,axes=plt.subplots(1,2,figsize=(15,5))
         sns.barplot(
-            data=df.sort_values(by='AverageAdjustedProfitCILowerBound',ascending=False).iloc[:5,:],
-            x='AverageAdjustedProfitCILowerBound',
+            data=df.sort_values(by='AvgAvgAdjProfitConservativeCILowerBound',ascending=False).iloc[:5,:],
+            x='AvgAvgAdjProfitConservativeCILowerBound',
             y='ProductSubCategoryName',
             palette = sns.light_palette("navy", reverse=False, as_cmap=False,n_colors=5),
             edgecolor=".2",
-            hue='AverageAdjustedProfitCILowerBound',
+            hue='AvgAvgAdjProfitConservativeCILowerBound',
             legend=False,
             ax=axes[0]
         )
         sns.barplot(
-            data=df.sort_values(by='AverageAdjustedProfitCILowerBound',ascending=False).iloc[:5,:],
+            data=df.sort_values(by='AvgAvgAdjProfitConservativeCILowerBound',ascending=False).iloc[:5,:],
             x='NumSold',
             y='ProductSubCategoryName',
             palette = sns.light_palette("navy", reverse=False, as_cmap=False,n_colors=5),
             edgecolor=".2",
-            hue='AverageAdjustedProfitCILowerBound',
+            hue='AvgAvgAdjProfitConservativeCILowerBound',
             legend=False,
             ax=axes[1]
         )
         # Set axis labels and titles
-        axes[0].set_xlabel('Average Profit Lower Bound')
+        axes[0].set_xlabel('Profitability Score Lower Bound')
         axes[0].set_ylabel('Product')
-        axes[0].set_title('TOP 5 SELLERS AND THEIR AVERAGE PROFIT LOWER BOUNDS (TARGETED SEGMENT)')
+        axes[0].set_title('TOP 5 SELLERS AND PROFITABILITY SCORE LOWER BOUNDS (TARGETED SEGMENT)')
         axes[1].set_xlabel('Number of items sold')
         axes[1].set_ylabel('Product')
         axes[1].set_title('TOP 5 SELLERS AND THEIR TOTAL VOLUME OF SALES (TARGETED SEGMENT)')
